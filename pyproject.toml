@@ -100,6 +100,9 @@ embodied = [
     "opencv-python",
     "gymnasium",
     "gym",
+    # The H01 driver reaches its robot through that robot's MCP server; the
+    # server itself is deployed from toolkits/h01_mcp and pins the same major.
+    "mcp<2",
 ]
 
 [tool.uv]

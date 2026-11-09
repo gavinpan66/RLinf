@@ -22,6 +22,7 @@ from .dual_franka import DualFrankaConfig, DualFrankaRobot
 from .dual_yam import DualYamConfig, DualYamRobot
 from .franka import FrankaConfig, FrankaRobot
 from .gim_arm import GimArmConfig, GimArmRobot
+from .h01 import H01Config, H01Robot
 from .piper import PiperConfig, PiperRobot
 from .so101 import SO101Config, SO101Robot
 from .turtle2 import Turtle2Config, Turtle2Robot
@@ -37,6 +38,8 @@ __all__ = [
     "FrankaRobot",
     "GimArmConfig",
     "GimArmRobot",
+    "H01Config",
+    "H01Robot",
     "PiperConfig",
     "PiperRobot",
     "SO101Config",

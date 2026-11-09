@@ -28,6 +28,7 @@ from .arms.base import Arm
 from .base import Action, Connection, Features, Observation
 from .cameras.base import Camera
 from .end_effectors.base import EndEffector
+from .joints.base import JointGroup
 
 
 def host_state(host: Any) -> dict[str, Any]:
@@ -239,3 +240,68 @@ class MethodCamera(Camera):
     def get_observation(self) -> Observation:
         """Fetch one frame through the configured host method."""
         return {"frame": getattr(self._host, self.method)(*self.method_args)}
+
+
+class MethodJointGroup(JointGroup):
+    """Expose a joint group through methods on a shared host connection.
+
+    Args:
+        host: The part owning the connection.
+        name: Host state prefix, ``name_joints``, and the command suffix,
+            ``move_name``.
+        limits: Travel of each joint in radians, shaped ``(dof, 2)``.
+        command: Host method taking a target, when it is not ``move_name``.
+    """
+
+    def __init__(
+        self,
+        host: "Connection",
+        name: str,
+        limits: Any,
+        command: Optional[str] = None,
+    ) -> None:
+        self._host = self._owner = host
+        self._name = name
+        self._limits = np.asarray(limits, dtype=float)
+        if self._limits.ndim != 2 or self._limits.shape[1] != 2:
+            raise ValueError(
+                f"Joint group {name!r} needs (dof, 2) limits, got {self._limits.shape}."
+            )
+        self._command = command or f"move_{name}"
+
+    @property
+    def dof(self) -> int:
+        """Return the number of joints this group drives."""
+        return int(self._limits.shape[0])
+
+    @property
+    def observation_features(self) -> Features:
+        """Describe the joint positions this group reports."""
+        return {"joint_position": {"shape": (self.dof,), "dtype": "float32"}}
+
+    @property
+    def action_features(self) -> Features:
+        """Describe the absolute joint targets this group accepts."""
+        return {"joint_position": {"shape": (self.dof,), "dtype": "float32"}}
+
+    def reset(self) -> None:
+        """Leave task-specific reset motion to the task environment."""
+
+    def get_observation(self) -> Observation:
+        """Select this group's joints out of the shared host state."""
+        return {"joint_position": host_state(self._host)[f"{self._name}_joints"]}
+
+    def send_action(self, action: Action) -> Observation:
+        """Dispatch an absolute joint target to the host."""
+        if set(action) != {"joint_position"}:
+            raise KeyError(
+                f"Joint group {self._name!r} takes only 'joint_position'; got "
+                f"{sorted(action)}."
+            )
+        target = np.asarray(action["joint_position"], dtype=float).reshape(-1)
+        if target.shape != (self.dof,):
+            raise ValueError(
+                f"Expected {self.dof} joint targets for {self._name!r}, got "
+                f"{target.shape}."
+            )
+        return {"joint_position": getattr(self._host, self._command)(target)}

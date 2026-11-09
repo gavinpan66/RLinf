@@ -3385,6 +3385,7 @@ def test_every_part_presents_a_device_category():
         from rlinf.robotics.parts.base import PartGroup, RobotPart
         from rlinf.robotics.parts.cameras.base import Camera
         from rlinf.robotics.parts.end_effectors.base import EndEffector
+        from rlinf.robotics.parts.joints.base import JointGroup
         from rlinf.robotics.parts.mobility.base import MobileBase
         from rlinf.robotics.parts.teleop import TeleopPart
 
@@ -3395,7 +3396,7 @@ def test_every_part_presents_a_device_category():
                 yield child
                 yield from descendants(child)
 
-        categories = (Arm, Camera, EndEffector, MobileBase, TeleopPart)
+        categories = (Arm, Camera, EndEffector, JointGroup, MobileBase, TeleopPart)
         homeless = sorted(
             cls.__name__
             for cls in descendants(RobotPart)
@@ -7137,3 +7138,126 @@ def test_SE3_body_delta_compose_round_trip():
 
         assert np.allclose(T_rec[..., :3, :3], T_abs[..., :3, :3], atol=1e-6)
         assert np.allclose(T_rec[..., :3, 3], T_abs[..., :3, 3], atol=1e-6)
+
+
+# -- H01 over MCP ------------------------------------------------------------
+
+
+def _h01_state() -> dict:
+    """A body snapshot shaped like the H01 MCP server's reply."""
+    return {
+        "left_arm": {"position": [0.1] * 7, "velocity": [0.0] * 7},
+        "right_arm": {"position": [-0.1] * 7, "velocity": [0.0] * 7},
+        "left_gripper": {"position": 0.03},
+        "right_gripper": {"position": 0.05},
+        "head": {"position": [0.2, -0.1]},
+        "waist": {"position": [0.3, -0.4, 0.5, 0.6]},
+        "ages_s": {"arm": 0.001, "gripper": 0.001, "head": 0.001, "waist": 0.001},
+        "engaged": True,
+    }
+
+
+@pytest.fixture
+def h01_calls(monkeypatch):
+    """Compose an H01 whose MCP calls are served from memory."""
+    import rlinf.robotics.parts.h01 as h01_module
+
+    calls: list[tuple[str, dict]] = []
+    state = _h01_state()
+
+    def fake_call(self, tool, arguments=None):
+        calls.append((tool, dict(arguments or {})))
+        if tool == "h01_step":
+            return {"applied": {}, "state": state}
+        if tool in ("h01_get_state", "h01_stop"):
+            return state
+        if tool == "h01_release":
+            return {"released": True}
+        raise AssertionError(f"unexpected tool {tool}")
+
+    monkeypatch.setattr(h01_module.H01MCPConnection, "_call", fake_call)
+    monkeypatch.setattr(h01_module.H01MCPConnection, "_open", lambda self: object())
+    return calls
+
+
+def test_h01_composes_the_upper_body_from_one_mcp_session(h01_calls):
+    from rlinf.robotics.discovery import build_robot
+
+    robot = build_robot(
+        "H01", endpoint="http://robot:8100/mcp", node_rank=None, camera=None
+    )
+    tree = robot.describe()
+    for path in ("left", "right", "arm", "end_effector", "head", "waist"):
+        assert path in tree
+    assert "base" not in tree
+
+    robot.connect()
+    try:
+        observation = robot.get_observation()
+        for side, sign in (("left", 0.1), ("right", -0.1)):
+            joints = observation[side]["arm"]["arm_joint_position"]
+            assert joints.shape == (7,)
+            assert np.allclose(joints, sign)
+            assert observation[side]["end_effector"]["state"].shape == (1,)
+        assert observation["head"]["joint_position"].shape == (2,)
+        waist = observation["waist"]["joint_position"]
+        assert waist.shape == (4,)
+        assert np.allclose(waist, [0.3, -0.4, 0.5, 0.6])
+    finally:
+        robot.disconnect()
+
+
+def test_h01_clips_each_step_to_the_joint_limits(h01_calls):
+    from rlinf.robotics.discovery import build_robot
+    from rlinf.robotics.parts.h01 import ARM_LIMITS
+
+    robot = build_robot(
+        "H01",
+        endpoint="http://robot:8100/mcp",
+        node_rank=None,
+        camera=None,
+        max_step_delta=0.1,
+    )
+    robot.connect()
+    try:
+        robot.get_observation()
+        h01_calls.clear()
+        robot.send_action({"left": {"arm": {"joint_position": np.full(7, 10.0)}}})
+        robot.get_observation()
+        sent = np.asarray(
+            [call for call in h01_calls if call[0] == "h01_step"][0][1]["left_arm"]
+        )
+        # Clipped to the joint travel, then held to one step of motion.
+        assert np.all(sent <= ARM_LIMITS["left"][:, 1] + 1e-6)
+        assert np.all(sent >= ARM_LIMITS["left"][:, 0] - 1e-6)
+        assert np.all(np.abs(sent - 0.1) <= 0.1 + 1e-6)
+    finally:
+        robot.disconnect()
+
+
+def test_h01_spends_one_round_trip_per_step(h01_calls):
+    from rlinf.robotics.discovery import build_robot
+
+    robot = build_robot(
+        "H01", endpoint="http://robot:8100/mcp", node_rank=None, camera=None
+    )
+    robot.connect()
+    try:
+        robot.get_observation()
+        h01_calls.clear()
+        robot.send_action(
+            {
+                "left": {"arm": {"joint_position": np.zeros(7)}},
+                "right": {"arm": {"joint_position": np.zeros(7)}},
+            }
+        )
+        robot.get_observation()
+        steps = [call for call in h01_calls if call[0] == "h01_step"]
+        assert len(steps) == 1
+        sent = steps[0][1]
+        assert np.allclose(sent["left_arm"], 0.0, atol=1e-6)
+        assert np.allclose(sent["right_arm"], 0.0, atol=1e-6)
+        assert "base_velocity" not in sent
+        assert "head" not in sent and "waist" not in sent
+    finally:
+        robot.disconnect()

@@ -51,8 +51,14 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .parts.arms import ARM_STATE_FIELDS, Arm, ArmState, BaseArm
     from .parts.cameras import BaseCamera, Camera, CameraInfo
     from .parts.end_effectors import BaseGripper, BaseHand, EndEffector
+    from .parts.joints import JointGroup
     from .parts.mobility import MobileBase
-    from .parts.views import MethodArm, MethodCamera, MethodEndEffector
+    from .parts.views import (
+        MethodArm,
+        MethodCamera,
+        MethodEndEffector,
+        MethodJointGroup,
+    )
     from .robot import Robot
     from .robots import (
         DOSW1Robot,
@@ -65,6 +71,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         FrankaRobot,
         GimArmConfig,
         GimArmRobot,
+        H01Config,
+        H01Robot,
         PiperConfig,
         PiperRobot,
         SO101Config,
@@ -90,7 +98,13 @@ _MODULE_GROUPS: dict[str, tuple[str, ...]] = {
     ".parts.end_effectors": ("BaseGripper", "BaseHand", "EndEffector"),
     ".parts.mobility": ("MobileBase",),
     ".robot": ("Robot",),
-    ".parts.views": ("MethodArm", "MethodCamera", "MethodEndEffector"),
+    ".parts.joints": ("JointGroup",),
+    ".parts.views": (
+        "MethodArm",
+        "MethodCamera",
+        "MethodEndEffector",
+        "MethodJointGroup",
+    ),
     ".robots": (
         "DOSW1Robot",
         "DOSW1RobotConfig",
@@ -102,6 +116,8 @@ _MODULE_GROUPS: dict[str, tuple[str, ...]] = {
         "FrankaRobot",
         "GimArmConfig",
         "GimArmRobot",
+        "H01Config",
+        "H01Robot",
         "PiperConfig",
         "PiperRobot",
         "SO101Config",
@@ -154,10 +170,14 @@ __all__ = [
     "FrankaRobot",
     "GimArmConfig",
     "GimArmRobot",
+    "H01Config",
+    "H01Robot",
+    "JointGroup",
     "LegacyObservationAdapter",
     "MethodArm",
     "MethodCamera",
     "MethodEndEffector",
+    "MethodJointGroup",
     "MobileBase",
     "Observation",
     "PartGroup",
