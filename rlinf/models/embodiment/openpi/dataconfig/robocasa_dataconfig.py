@@ -48,19 +48,19 @@ class LeRobotRobocasaDataConfig(DataConfigFactory):
         # and then modify the mappings below so your dataset's keys get matched to those target keys.
         # The repack transform simply remaps key names here.
 
-        # FIXME: repack_transform is not used in RLinf, neither RL nor SFT;
-        # an empty repack_transform is used to wrap the model.
-        # these keys are features in LerobotDataset, so you can use it to make SFT right.
+        # RoboCasaInputs reads ``observation/*`` keys, which is what the env emits
+        # during rollout; LeRobot datasets name the same fields ``state``,
+        # ``image_left``, ``image_right`` and ``wrist_image``. Map them here so SFT
+        # and rollout share one transform pipeline.
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "image_left": "image_left",
-                        "image_right": "image_right",
-                        "wrist_image": "wrist_image",
-                        "state": "state",
+                        "observation/state": "state",
+                        "observation/image": "image_left",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/extra_view_image": "image_right",
                         "actions": "actions",
-                        "task_index": "task_index",
                         "prompt": "prompt",
                     }
                 )
