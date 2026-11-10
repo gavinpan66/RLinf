@@ -1,0 +1,242 @@
+GigaAI Maker H01 真机强化学习
+========================================
+
+在 H01 的上身——两条七自由度机械臂、各自夹爪、两自由度头部和四自由度腰部——上训练 SAC，训练侧只通过机器人自己的 MCP server 通信。ROS 2 会话由 server 在机器人上持有，因此训练机只要能够访问 8100 端口即可。
+
+概览
+----------------------------------------
+
+在 H01 上身通过 Model Context Protocol 训练关节空间的 reach 任务。
+
+.. grid:: 2 4 4 4
+   :gutter: 2
+
+   .. grid-item-card:: 模型
+      :text-align: center
+
+      CNN policy
+
+   .. grid-item-card:: 算法
+      :text-align: center
+
+      SAC
+
+   .. grid-item-card:: 任务
+      :text-align: center
+
+      关节空间 reach
+
+   .. grid-item-card:: 硬件
+      :text-align: center
+
+      Maker H01 上身 · MCP · 头部 RealSense
+
+| **本页流程：** 部署 MCP server → 检查部件树 → 设定目标位姿 → 开始训练。
+| **前置条件：** :doc:`安装 </rst_source/start/installation>` · 已启动 ROS 2 驱动栈的 Maker H01 · 机器人上为 Python 3.10。
+
+上身部件树
+----------------------------------------
+
+机器人在 RLinf 中呈现为厂商实际驱动的部件，每个部件都可以按路径寻址。这棵树覆盖上身，底盘由机器人自身的导航栈负责。
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 40 38
+
+   * - 路径
+     - 关节
+     - 命令
+   * - ``left.arm``
+     - ``L_SHOULDER_P``、``L_SHOULDER_R``、``L_SHOULDER_Y``、``L_ELBOW_Y``、``L_WRIST_P``、``L_WRIST_Y``、``L_WRIST_R``
+     - 绝对关节角，弧度
+   * - ``left.end_effector``
+     - ``left_gripper``
+     - 开合量，米，范围 ``0 .. 0.06``
+   * - ``right.arm``
+     - ``R_SHOULDER_P``、``R_SHOULDER_R``、``R_SHOULDER_Y``、``R_ELBOW_Y``、``R_WRIST_P``、``R_WRIST_Y``、``R_WRIST_R``
+     - 绝对关节角，弧度
+   * - ``right.end_effector``
+     - ``right_gripper``
+     - 开合量，米，范围 ``0 .. 0.06``
+   * - ``head``
+     - ``HEAD_YAW``、``HEAD_PITCH``
+     - 绝对关节角，弧度
+   * - ``waist``
+     - ``WAIST_1`` … ``WAIST_4``
+     - 绝对关节角，弧度
+   * - ``camera_head``
+     - RealSense D435 彩色，640×480
+     - 只读
+
+每一侧把机械臂和夹爪放在同一个 group 下，因为厂商把该侧的关节和夹爪发布在两条话题上，而它们由同一个会话写入。头部和腰部是 ``JointGroup`` 部件：它们和机械臂一样按关节空间运动，但不带末端工具，所以不会出现在 ``parts_of_type(Arm)`` 的结果里。
+
+环境的观测与动作
+----------------------------------------
+
+环境读取整个上身，默认只控制两条机械臂。头部和腰部每步都会被观测，但保持不动，除非任务要求控制它们。
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 18 56
+
+   * - 字段
+     - shape
+     - 含义
+   * - ``state/arm_joint_position``
+     - ``(14,)``
+     - 两条机械臂，按动作顺序排列，弧度
+   * - ``state/gripper_position``
+     - ``(2,)``
+     - 左右夹爪开合量，米
+   * - ``state/head_joint_position``
+     - ``(2,)``
+     - 偏航与俯仰，弧度
+   * - ``state/waist_joint_position``
+     - ``(4,)``
+     - 四个腰部关节，弧度
+   * - ``frames/head``
+     - ``(128, 128, 3)``
+     - 居中裁剪后的头部相机画面
+   * - action
+     - ``(16,)``
+     - ``[左臂 7, 左夹爪, 右臂 7, 右夹爪]``
+   * - reward
+     - 标量
+     - 开启 ``use_dense_reward`` 时为关节距离的负值；否则按 ``reward_threshold`` 判定是否命中
+
+``H01ReachEnv-v1`` 默认把环境构建时机械臂所在的位姿当作复位位姿，``reset_joint_qpos`` 可以指定固定的复位构型。所有被控制的关节都会裁到厂商行程之内，并且每步最多移动 ``max_step_delta`` 弧度，因此刚初始化的 policy 不会把机械臂甩出去。
+
+在机器人上部署 MCP server
+----------------------------------------
+
+机器人对外提供的是 ROS 2 话题而非 Python SDK，``toolkits/h01_mcp`` 把这些话题封装成 Model Context Protocol server。server 跑在机器人上，训练机不加入 ROS graph。
+
+.. code:: bash
+
+   mkdir -p ~/h01_mcp && cd ~/h01_mcp
+   python3 -m venv --system-site-packages .venv
+   .venv/bin/pip install "mcp<2"
+
+``--system-site-packages`` 让 server 能直接 import 机器人 ROS 2 安装里的 ``rclpy``、``cv2`` 和 ``numpy``。把 ``toolkits/h01_mcp`` 下的 ``server.py``、``h01_bridge.py`` 和 ``restart.sh`` 复制到 ``~/h01_mcp``，然后启动：
+
+.. code:: bash
+
+   bash ~/h01_mcp/restart.sh
+
+这条命令做三件事：1. 释放仍被旧 server 占用的 8100 端口；2. source ``/opt/ros/humble/setup.bash``；3. 以 detached 方式在 ``0.0.0.0:8100`` 启动 server 并打印监听状态。
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - 工具
+     - 用途
+   * - ``h01_describe``
+     - 关节名、限位、命令频率，以及 server 暴露的相机
+   * - ``h01_get_state``
+     - 双臂、双夹爪、头部和腰部的状态
+   * - ``h01_step``
+     - 下发一次动作并返回结果状态，可选带回一帧 JPEG
+   * - ``h01_get_frame``
+     - 当前头部画面，base64 编码的 JPEG
+   * - ``h01_stop``
+     - 把上身各组保持在实测位置
+   * - ``h01_release``
+     - 结束命令流
+
+环境调用的是 ``h01_step``：它把本轮所有目标放在一次往返里下发并返回结果状态，所以一步只花一次请求，而不是每个部件各一次。
+
+关节电机在最后一条命令后 0.2 秒停止（``left_arm_motors.yaml`` 里的 ``command_timeout_s``），因此客户端一旦接管，server 会以 15 Hz 重发最后的目标。客户端卡住时上身保持原位，而不会失去控制。
+
+.. warning::
+
+   server 接受任何能访问 8100 端口的主机的调用，并且不做认证。在与其它机器共享网络之前，请把它绑定到训练机地址，或用防火墙限制来源。
+
+配置运行
+----------------------------------------
+
+把集群指向 server，并把环境 worker 放在承载机器人的那个 group 里。
+
+.. code:: yaml
+
+   cluster:
+     num_nodes: 1
+     component_placement:
+       actor,rollout: 0
+       env:
+         node_group: h01
+         placement: 0
+     node_groups:
+       - label: h01
+         node_ranks: 0
+         hardware:
+           type: H01
+           configs:
+             - node_rank: 0
+               endpoint: http://172.16.72.30:8100/mcp
+               camera: head
+               camera_width: 320
+               max_step_delta: 0.1
+
+``endpoint`` 是 server 的 URL，``camera`` 指定 server 暴露的画面流，``max_step_delta`` 是单步关节位移上限。这些字段由 ``H01Config`` 读取；任务自身的设置留在 ``env.train.override_cfg`` 下：
+
+.. code:: yaml
+
+   env:
+     train:
+       override_cfg:
+         is_dummy: False
+         use_dense_reward: True
+         step_frequency: 10.0
+         reset_joint_qpos: null       # null 表示保持构建时实测的位姿
+         target_joint_qpos: null      # 真正的 reach 任务需要填 14 个目标角
+
+``target_joint_qpos`` 按 ``state/arm_joint_position`` 的顺序给出目标构型。填 ``null`` 时目标就是复位位姿，只能用来跑通链路。
+
+运行
+----------------------------------------
+
+先确认部件树，再让机器人动。下面的检查会连接、读取每个已声明的部件、把读数和声明的 shape 比对，然后释放：
+
+.. code:: bash
+
+   python -m toolkits.realworld_check.check_robot_parts H01 \
+       --arg endpoint=http://172.16.72.30:8100/mcp --arg node_rank=0
+
+它会打印部件树，然后逐个部件输出一行：
+
+.. code:: text
+
+   H01Robot
+   ├── left
+   │   ├── arm           H01Arm
+   │   └── end_effector  MethodEndEffector
+   ├── right
+   │   ├── arm           H01Arm
+   │   └── end_effector  MethodEndEffector
+   ├── head              MethodJointGroup
+   ├── waist             MethodJointGroup
+   └── camera_head       MethodCamera
+
+随后开始训练：
+
+.. code:: bash
+
+   bash examples/embodiment/run_realworld.sh realworld_h01_reach_sac_cnn
+
+runner 会把一个环境与一条机器人记录配对。观察 ``env/success_once`` 可以看到每个 episode 是否成功；机械臂按 ``step_frequency`` 运动，10 Hz 下 30 步的 episode 约持续三秒。
+
+控制头部与腰部
+----------------------------------------
+
+任务需要控制头部或腰部时，把它们加入动作向量。在 ``override_cfg`` 里打开开关，并同步放宽 policy：
+
+.. code:: yaml
+
+   env:
+     train:
+       override_cfg:
+         control_head: True
+         control_waist: True
+
+动作变为 ``(22,)``：先是十六个机械臂和夹爪数值，然后是偏航与俯仰，最后是四个腰部关节，因此还要把运行配置里的 ``actor.model.action_dim`` 设为 22。``state_dim`` 保持 22，因为无论是否控制，头部和腰部都会被观测。这两组和机械臂一样受 ``max_step_delta`` 限制。

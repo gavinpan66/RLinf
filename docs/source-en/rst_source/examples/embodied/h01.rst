@@ -1,0 +1,242 @@
+Real-World RL with GigaAI Maker H01
+===================================
+
+Train SAC on the H01 upper body — both seven-joint arms, their grippers, the two-joint head, and the four-joint waist — through the robot's own MCP server. The server owns the ROS 2 session on the robot, so the training host needs network access to port 8100 and nothing else.
+
+Overview
+--------
+
+Train a joint-space reach policy on the H01 upper body over Model Context Protocol.
+
+.. grid:: 2 4 4 4
+   :gutter: 2
+
+   .. grid-item-card:: Models
+      :text-align: center
+
+      CNN policy
+
+   .. grid-item-card:: Algorithms
+      :text-align: center
+
+      SAC
+
+   .. grid-item-card:: Tasks
+      :text-align: center
+
+      Joint-space reach
+
+   .. grid-item-card:: Hardware
+      :text-align: center
+
+      Maker H01 upper body · MCP · head RealSense
+
+| **You'll do:** deploy the MCP server → check the part tree → set a target pose → train.
+| **Prerequisites:** :doc:`Installation </rst_source/start/installation>` · Maker H01 with its ROS 2 driver stack running · Python 3.10 on the robot.
+
+The Upper-Body Part Tree
+------------------------
+
+The robot appears in RLinf as the parts the vendor drives, each addressable by path. The tree covers the upper body; the chassis moves under the robot's own navigation stack.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 40 38
+
+   * - Path
+     - Joints
+     - Command
+   * - ``left.arm``
+     - ``L_SHOULDER_P``, ``L_SHOULDER_R``, ``L_SHOULDER_Y``, ``L_ELBOW_Y``, ``L_WRIST_P``, ``L_WRIST_Y``, ``L_WRIST_R``
+     - Absolute joint positions, radians
+   * - ``left.end_effector``
+     - ``left_gripper``
+     - Opening, metres in ``0 .. 0.06``
+   * - ``right.arm``
+     - ``R_SHOULDER_P``, ``R_SHOULDER_R``, ``R_SHOULDER_Y``, ``R_ELBOW_Y``, ``R_WRIST_P``, ``R_WRIST_Y``, ``R_WRIST_R``
+     - Absolute joint positions, radians
+   * - ``right.end_effector``
+     - ``right_gripper``
+     - Opening, metres in ``0 .. 0.06``
+   * - ``head``
+     - ``HEAD_YAW``, ``HEAD_PITCH``
+     - Absolute joint positions, radians
+   * - ``waist``
+     - ``WAIST_1`` … ``WAIST_4``
+     - Absolute joint positions, radians
+   * - ``camera_head``
+     - RealSense D435 colour, 640×480
+     - Read-only
+
+Each side is one group because the arm and its gripper are separate topics that the same session writes, so the tree keeps the pair together. The head and the waist are ``JointGroup`` parts: they move in joint space like an arm but carry no tool, so they stay out of ``parts_of_type(Arm)``.
+
+What an Environment Sees and Sends
+----------------------------------
+
+The environment reads the whole upper body and commands the arms. Head and waist joints are observed every step and held unless a task asks for them.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 20 54
+
+   * - Field
+     - Shape
+     - Meaning
+   * - ``state/arm_joint_position``
+     - ``(14,)``
+     - Both arms in action order, radians
+   * - ``state/gripper_position``
+     - ``(2,)``
+     - Left and right opening, metres
+   * - ``state/head_joint_position``
+     - ``(2,)``
+     - Yaw and pitch, radians
+   * - ``state/waist_joint_position``
+     - ``(4,)``
+     - Four waist joints, radians
+   * - ``frames/head``
+     - ``(128, 128, 3)``
+     - Centre-cropped head camera frame
+   * - action
+     - ``(16,)``
+     - ``[left 7, left gripper, right 7, right gripper]``
+   * - reward
+     - scalar
+     - Negative joint distance with ``use_dense_reward: true``; a sparse hit within ``reward_threshold`` otherwise
+
+``H01ReachEnv-v1`` holds the pose the arms have when the environment is built unless ``reset_joint_qpos`` names a rest configuration. Every commanded joint is clipped to the vendor's travel and to ``max_step_delta`` radians per step, so a freshly initialised policy cannot snap the arms.
+
+Deploy the Server on the Robot
+------------------------------
+
+The robot exposes ROS 2 topics rather than a Python SDK, so ``toolkits/h01_mcp`` wraps those topics in a Model Context Protocol server. Run it on the robot; the training host never joins the ROS graph.
+
+.. code:: bash
+
+   mkdir -p ~/h01_mcp && cd ~/h01_mcp
+   python3 -m venv --system-site-packages .venv
+   .venv/bin/pip install "mcp<2"
+
+The ``--system-site-packages`` flag lets the server import ``rclpy``, ``cv2``, and ``numpy`` from the robot's ROS 2 installation. Copy ``server.py``, ``h01_bridge.py``, and ``restart.sh`` from ``toolkits/h01_mcp`` into ``~/h01_mcp``, then start it:
+
+.. code:: bash
+
+   bash ~/h01_mcp/restart.sh
+
+What this does: 1. frees port 8100 if an older server still holds it; 2. sources ``/opt/ros/humble/setup.bash``; 3. starts the server detached on ``0.0.0.0:8100`` and prints the listener.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Tool
+     - Purpose
+   * - ``h01_describe``
+     - Joint names, limits, command rate, and the camera the server exposes
+   * - ``h01_get_state``
+     - Both arms, both grippers, head, and waist
+   * - ``h01_step``
+     - Apply one action and return the resulting state, optionally with a JPEG frame
+   * - ``h01_get_frame``
+     - Current head frame as base64 JPEG
+   * - ``h01_stop``
+     - Hold every upper-body group at its measured position
+   * - ``h01_release``
+     - End the command stream
+
+``h01_step`` is what an environment calls: it carries every staged target in one round trip and returns the state that resulted, so a step costs one request rather than one per part.
+
+A joint motor stops 0.2 s after its last command (``command_timeout_s`` in ``left_arm_motors.yaml``), so the server republishes the last targets at 15 Hz once a client takes control. A client that stalls therefore leaves the body holding its pose instead of dropping it.
+
+.. warning::
+
+   The server accepts tool calls from any host that can reach port 8100 and authenticates nothing. Bind it to the training host's address, or put it behind a firewall, before it shares a network with other machines.
+
+Configure a Run
+---------------
+
+Point the cluster at the server and place the environment worker in the group that carries the robot.
+
+.. code:: yaml
+
+   cluster:
+     num_nodes: 1
+     component_placement:
+       actor,rollout: 0
+       env:
+         node_group: h01
+         placement: 0
+     node_groups:
+       - label: h01
+         node_ranks: 0
+         hardware:
+           type: H01
+           configs:
+             - node_rank: 0
+               endpoint: http://172.16.72.30:8100/mcp
+               camera: head
+               camera_width: 320
+               max_step_delta: 0.1
+
+``endpoint`` is the URL of the server, ``camera`` names the stream the server exposes, and ``max_step_delta`` is the per-step joint cap. The environment reads them through ``H01Config``; the task's own settings stay under ``env.train.override_cfg``:
+
+.. code:: yaml
+
+   env:
+     train:
+       override_cfg:
+         is_dummy: False
+         use_dense_reward: True
+         step_frequency: 10.0
+         reset_joint_qpos: null       # null holds the pose measured at build time
+         target_joint_qpos: null      # set the 14 goal angles for a real reach
+
+Set ``target_joint_qpos`` to the goal configuration in the same order as ``state/arm_joint_position``. With ``null`` the goal is the reset pose, which only exercises the pipeline.
+
+Run It
+------
+
+Check the part tree before anything moves. This connects, reads every declared part, compares each reading with its declared shape, and releases:
+
+.. code:: bash
+
+   python -m toolkits.realworld_check.check_robot_parts H01 \
+       --arg endpoint=http://172.16.72.30:8100/mcp --arg node_rank=0
+
+It prints the tree, then one line per part:
+
+.. code:: text
+
+   H01Robot
+   ├── left
+   │   ├── arm           H01Arm
+   │   └── end_effector  MethodEndEffector
+   ├── right
+   │   ├── arm           H01Arm
+   │   └── end_effector  MethodEndEffector
+   ├── head              MethodJointGroup
+   ├── waist             MethodJointGroup
+   └── camera_head       MethodCamera
+
+Then start training:
+
+.. code:: bash
+
+   bash examples/embodiment/run_realworld.sh realworld_h01_reach_sac_cnn
+
+The runner pairs one environment with one robot record. Watch ``env/success_once`` for the episodic success rate; the arms move at ``step_frequency``, so a 30-step episode at 10 Hz lasts three seconds.
+
+Drive the Head and Waist
+------------------------
+
+The head and the waist join the action vector when the task controls them. Set the flags in ``override_cfg`` and widen the policy to match:
+
+.. code:: yaml
+
+   env:
+     train:
+       override_cfg:
+         control_head: True
+         control_waist: True
+
+The action becomes ``(22,)`` — the sixteen arm values, then yaw and pitch, then the four waist joints — so set ``actor.model.action_dim: 22`` in the run config. ``state_dim`` stays 22 because the head and waist are observed either way. Both groups obey the same ``max_step_delta`` cap as the arms.
