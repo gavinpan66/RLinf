@@ -1,0 +1,104 @@
+defaults:
+  - env/robocasa365@env.eval
+  - model/pi0_5@rollout.model
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env,rollout: all
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: ${oc.env:LOADDISHWASHER_EVAL_LOG_DIR,/home/panyan/workspace/results/robocasa365_loaddishwasher_eval_pi05}
+    project_name: rlinf
+    experiment_name: "robocasa365_loaddishwasher_eval_pi05"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 1
+  max_steps: -1
+  val_check_interval: -1
+  save_interval: -1
+
+env:
+  group_name: "EnvGroup"
+  eval:
+    rollout_epoch: 1
+    total_num_envs: 1
+    seed: 7
+    seed_strategy: openpi
+    split: pretrain
+    task_soup: composite_seen
+    task_filter: ["LoadDishwasher"]
+    task_mode: composite
+    task_sampling_strategy: ordered
+    auto_reset: False
+    ignore_terminations: False
+    use_fixed_reset_state_ids: True
+    episode_horizon_source: task_horizon
+    max_episode_steps: 1800
+    max_steps_per_rollout_epoch: 1800
+    group_size: 1
+    is_eval: True
+    observation:
+      state_layout:
+        - base_pos
+        - base_quat
+        - base_to_eef_pos
+        - base_to_eef_quat
+        - gripper_qpos
+    video_cfg:
+      save_video: False
+      info_on_video: True
+      video_base_dir: ${runner.logger.log_path}/video
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  unnorm_key: robocasa
+  enable_offload: False
+  pipeline_stage_num: 1
+  sampling_params:
+    do_sample: False
+    temperature_train: 1.0
+    temperature_eval: 0.0
+    top_k: 0
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: False
+    max_new_tokens: null
+  model:
+    model_path: ${oc.env:LOADDISHWASHER_SFT_CKPT,/home/panyan/workspace/results/robocasa365_loaddishwasher_sft_pi05_8k/robocasa365_loaddishwasher_sft_pi05/checkpoints/global_step_8000}
+    precision: null
+    pi05: True
+    num_action_chunks: 5
+    action_dim: 12
+    num_steps: 5
+    num_images_in_input: 3
+    openpi:
+      task: eval
+      config_name: "pi05_robocasa365_v3"
+      num_images_in_input: 3
+      num_steps: 5
+      action_chunk: 5
+      action_env_dim: 12
+      model_action_dim: 32
+      paligemma_variant: "gemma_2b"
+      action_expert_variant: "gemma_300m"
+      max_token_len: 200
+      torch_compile: True
+    openpi_data:
+      state_space: "16d"
+      image_space: "3views"
+      action_space: "12d"
+      norm_stats_path: ${oc.env:LOADDISHWASHER_NORM_STATS,/home/panyan/workspace/RLinf/env/assets/robocasa365_loaddishwasher/norm_stats.json}
